@@ -1,0 +1,12 @@
+{
+  "slug": "black-hole-animation",
+  "title": "Black Hole Animation",
+  "tags": [],
+  "useTailwind": false,
+  "html": "<html lang=\"en\">\n<head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n    <title>Black Holes Animation</title>\n    <link rel=\"stylesheet\" href=\"style.css\">\n</head>\n<body>\n    <canvas></canvas>\n    <script src=\"script.js\"></script>\n</body>\n</html>",
+  "css": "body{\n    margin: 0;\n    overflow: hidden;\n    background: #000000;\n}\n\ncanvas{\n    display: block;\n}",
+  "js": "const canvas = document.querySelector(\"canvas\");\nconst ctx = canvas.getContext(\"2d\");\ncanvas.width = window.innerWidth;\ncanvas.height = window.innerHeight;\nconst centerX = canvas.width/2;\nconst centerY = canvas.height/2;\nconst particles = [];\n\nfor (let i=0; i<400; i++){\n    particles.push({\n        angle:Math.random()*Math.PI*2,\n        radius:Math.random()*400+50,\n        speed:Math.random()*0.02+0.01\n    });\n}\n\nfunction animate(){\n    ctx.fillStyle=\"rgba(0, 0, 0, 0.16)\";\n    ctx.fillRect(onabort,onabort,canvas.width,canvas.height);\n    particles.forEach(p=>{\n        p.angle += p.speed;\n        p.radius *= 0.995;\n        const x = centerX + Math.cos(p.angle)*p.radius;\n        const y = centerY + Math.sin(p.angle)*p.radius;\n        ctx.beginPath();\n        ctx.arc(x,y,2,0,Math.PI*2);\n        ctx.fillStyle=\"hsl(\" + (p.radius*2) + \",100%,50%)\";\n        ctx.fill();\n        if(p.radius < 10){\n            p.radius = Math.random()*400+100;\n        }\n    });\n\nrequestAnimationFrame(animate);\n}\nanimate();\n",
+  "images": [],
+  "createdAt": "2026-11-13T06:44:45.422Z",
+  "updatedAt": "2026-11-13T06:44:45.422Z"
+}

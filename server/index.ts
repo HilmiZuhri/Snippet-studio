@@ -5,24 +5,32 @@ import path from 'node:path'
 
 const app = new Hono()
 
-// Lokasi folder penyimpanan di dalam project ini
 const VAULT_DIR = path.resolve(process.cwd(), 'snippets-vault')
 
-// Helper: Pastikan folder vault tersedia
+const MIME_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+}
+
 async function ensureVault() {
   await fs.mkdir(VAULT_DIR, { recursive: true })
 }
 
-// Helper: Ubah judul jadi nama folder yang aman (slug)
 function toSlug(text: string) {
-  return text
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '') || 'untitled-snippet'
+  return (
+    text
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'untitled-snippet'
+  )
 }
 
-// 1. GET semua snippet dari folder snippets-vault
+// 1. GET all snippets
 app.get('/api/snippets', async (c) => {
   await ensureVault()
   const entries = await fs.readdir(VAULT_DIR, { withFileTypes: true })
@@ -35,17 +43,18 @@ app.get('/api/snippets', async (c) => {
         const raw = await fs.readFile(jsonPath, 'utf-8')
         snippets.push(JSON.parse(raw))
       } catch {
-        // Lewati jika folder belum punya snippet.json
+        // Ignore folders without snippet.json
       }
     }
   }
 
-  // Urutkan dari yang terbaru diupdate
-  snippets.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+  snippets.sort(
+    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+  )
   return c.json(snippets)
 })
 
-// 2. POST simpan / update snippet ke file snippet.json
+// 2. POST save or update snippet
 app.post('/api/snippets', async (c) => {
   await ensureVault()
   const body = await c.req.json()
@@ -76,7 +85,7 @@ app.post('/api/snippets', async (c) => {
   return c.json({ ok: true, snippet: snippetData })
 })
 
-// 3. DELETE hapus folder snippet
+// 3. DELETE snippet folder
 app.delete('/api/snippets/:slug', async (c) => {
   const slug = toSlug(c.req.param('slug'))
   const snippetDir = path.join(VAULT_DIR, slug)
@@ -84,8 +93,98 @@ app.delete('/api/snippets/:slug', async (c) => {
   return c.json({ ok: true })
 })
 
+// 4. POST upload image into snippets-vault/<slug>/assets/
+app.post('/api/snippets/:slug/images', async (c) => {
+  const slug = toSlug(c.req.param('slug'))
+  const snippetDir = path.join(VAULT_DIR, slug)
+  const assetsDir = path.join(snippetDir, 'assets')
+  await fs.mkdir(assetsDir, { recursive: true })
+
+  const body = await c.req.parseBody()
+  const file = body['file']
+
+  if (!file || typeof file === 'string') {
+    return c.json({ ok: false, error: 'No image file provided' }, 400)
+  }
+
+  const originalName = file.name || 'pasted-image.png'
+  const ext = (path.extname(originalName) || '.png').toLowerCase()
+  const safeBase =
+    path
+      .basename(originalName, path.extname(originalName))
+      .replace(/[^a-zA-Z0-9_-]/g, '-')
+      .toLowerCase() || 'image'
+
+  const filename = `${safeBase}-${Date.now()}${ext}`
+  const filePath = path.join(assetsDir, filename)
+
+  const buffer = Buffer.from(await file.arrayBuffer())
+  await fs.writeFile(filePath, buffer)
+
+  // Update snippet.json images array if it exists
+  const jsonPath = path.join(snippetDir, 'snippet.json')
+  let updatedImages: string[] = [filename]
+  try {
+    const raw = await fs.readFile(jsonPath, 'utf-8')
+    const data = JSON.parse(raw)
+    updatedImages = Array.isArray(data.images)
+      ? [...data.images, filename]
+      : [filename]
+    data.images = updatedImages
+    data.updatedAt = new Date().toISOString()
+    await fs.writeFile(jsonPath, JSON.stringify(data, null, 2), 'utf-8')
+  } catch {
+    // snippet.json may not exist yet
+  }
+
+  return c.json({ ok: true, filename, images: updatedImages })
+})
+
+// 5. GET serve image asset
+app.get('/api/assets/:slug/:filename', async (c) => {
+  const slug = toSlug(c.req.param('slug'))
+  const filename = path.basename(c.req.param('filename'))
+  const filePath = path.join(VAULT_DIR, slug, 'assets', filename)
+
+  try {
+    const buffer = await fs.readFile(filePath)
+    const ext = path.extname(filename).toLowerCase()
+    const contentType = MIME_TYPES[ext] || 'application/octet-stream'
+    return c.body(new Uint8Array(buffer), 200, { 'Content-Type': contentType })
+  } catch {
+    return c.json({ error: 'Asset not found' }, 404)
+  }
+})
+
+// 6. DELETE remove image from assets and snippet.json
+app.delete('/api/snippets/:slug/images/:filename', async (c) => {
+  const slug = toSlug(c.req.param('slug'))
+  const filename = path.basename(c.req.param('filename'))
+  const snippetDir = path.join(VAULT_DIR, slug)
+  const filePath = path.join(snippetDir, 'assets', filename)
+
+  await fs.rm(filePath, { force: true })
+
+  const jsonPath = path.join(snippetDir, 'snippet.json')
+  let updatedImages: string[] = []
+  try {
+    const raw = await fs.readFile(jsonPath, 'utf-8')
+    const data = JSON.parse(raw)
+    updatedImages = Array.isArray(data.images)
+      ? data.images.filter((img: string) => img !== filename)
+      : []
+    data.images = updatedImages
+    data.updatedAt = new Date().toISOString()
+    await fs.writeFile(jsonPath, JSON.stringify(data, null, 2), 'utf-8')
+  } catch {
+    // Ignore if snippet.json doesn't exist
+  }
+
+  return c.json({ ok: true, images: updatedImages })
+})
+
 const port = 3001
-console.log(`🚀 Snippet Vault Server berjalan di http://localhost:${port}`)
-console.log(`📁 Lokasi penyimpanan file: ${VAULT_DIR}`)
+console.log(`🚀 Snippet Vault Server running at http://localhost:${port}`)
+console.log(`📁 Vault directory: ${VAULT_DIR}`)
 
 serve({ fetch: app.fetch, port })
