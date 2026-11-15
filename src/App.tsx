@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from 'react'
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import CodeMirror from '@uiw/react-codemirror'
 import { html as htmlLang } from '@codemirror/lang-html'
 import { css as cssLang } from '@codemirror/lang-css'
@@ -18,8 +18,11 @@ import {
   Eye,
   Image as ImageIcon,
   Columns2,
+  Download,
+  Copy,
 } from 'lucide-react'
 import { MediaPanel } from './components/MediaPanel'
+import { ConsolePanel, type ConsoleEntry } from './components/ConsolePanel'
 import type {
   EditorTab,
   RightPanelMode,
@@ -80,12 +83,13 @@ button {
 button:hover { background: #4f46e5; }`
 
 const DEFAULT_JS = `document.getElementById('demo-btn')?.addEventListener('click', () => {
-  alert('Snippet is working!');
+  console.log('Button clicked at', new Date().toLocaleTimeString());
 });`
 
 export default function App() {
   const [snippets, setSnippets] = useState<Snippet[]>([])
   const [search, setSearch] = useState('')
+  const [selectedTag, setSelectedTag] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<EditorTab>('html')
   const [rightMode, setRightMode] = useState<RightPanelMode>('preview')
   const [viewport, setViewport] = useState<ViewportSize>('desktop')
@@ -103,10 +107,41 @@ export default function App() {
   const [referenceImage, setReferenceImage] = useState<string | null>(null)
   const [createdAt, setCreatedAt] = useState<string | undefined>(undefined)
 
+  // UI & DX State
+  const [savedSnapshot, setSavedSnapshot] = useState(() =>
+    JSON.stringify({
+      title: 'Untitled Snippet',
+      tagsInput: '',
+      useTailwind: false,
+      html: DEFAULT_HTML,
+      css: DEFAULT_CSS,
+      js: DEFAULT_JS,
+    })
+  )
   const [isSaving, setIsSaving] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const [savedToast, setSavedToast] = useState(false)
+  const [copiedCode, setCopiedCode] = useState(false)
   const [debouncedCode, setDebouncedCode] = useState({ html, css, js, useTailwind })
+
+  // Console State
+  const [logs, setLogs] = useState<ConsoleEntry[]>([])
+  const [isConsoleOpen, setIsConsoleOpen] = useState(false)
+
+  // Resizable Split State
+  const splitContainerRef = useRef<HTMLDivElement>(null)
+  const [editorWidthPct, setEditorWidthPct] = useState(50)
+  const [isResizing, setIsResizing] = useState(false)
+
+  const currentSnapshot = JSON.stringify({
+    title,
+    tagsInput,
+    useTailwind,
+    html,
+    css,
+    js,
+  })
+  const isDirty = currentSnapshot !== savedSnapshot
 
   const fetchSnippets = useCallback(async () => {
     try {
@@ -126,15 +161,57 @@ export default function App() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
+      setLogs([])
       setDebouncedCode({ html, css, js, useTailwind })
     }, 300)
     return () => clearTimeout(timer)
   }, [html, css, js, useTailwind])
 
+  // Listen to console messages from iframe
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      if (e.data?.type === 'snippet-console') {
+        setLogs((prev) => [
+          ...prev,
+          {
+            id: Date.now() + Math.random(),
+            level: e.data.level,
+            message: e.data.message,
+            timestamp: new Date().toLocaleTimeString(),
+          },
+        ])
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [])
+
+  // Handle split pane resize drag
+  useEffect(() => {
+    if (!isResizing) return
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!splitContainerRef.current) return
+      const rect = splitContainerRef.current.getBoundingClientRect()
+      const pct = ((e.clientX - rect.left) / rect.width) * 100
+      setEditorWidthPct(Math.min(75, Math.max(25, pct)))
+    }
+
+    const onMouseUp = () => setIsResizing(false)
+
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
+  }, [isResizing])
+
   const loadSnippet = (snippet: Snippet) => {
+    const joinedTags = snippet.tags.join(', ')
     setSlug(snippet.slug)
     setTitle(snippet.title)
-    setTagsInput(snippet.tags.join(', '))
+    setTagsInput(joinedTags)
     setUseTailwind(snippet.useTailwind)
     setHtml(snippet.html)
     setCss(snippet.css)
@@ -143,6 +220,17 @@ export default function App() {
     setImages(imgs)
     setReferenceImage(imgs[0] || null)
     setCreatedAt(snippet.createdAt)
+    setLogs([])
+    setSavedSnapshot(
+      JSON.stringify({
+        title: snippet.title,
+        tagsInput: joinedTags,
+        useTailwind: snippet.useTailwind,
+        html: snippet.html,
+        css: snippet.css,
+        js: snippet.js,
+      })
+    )
   }
 
   const handleNewSnippet = () => {
@@ -156,9 +244,19 @@ export default function App() {
     setImages([])
     setReferenceImage(null)
     setCreatedAt(undefined)
+    setLogs([])
+    setSavedSnapshot(
+      JSON.stringify({
+        title: 'Untitled Snippet',
+        tagsInput: '',
+        useTailwind: false,
+        html: DEFAULT_HTML,
+        css: DEFAULT_CSS,
+        js: DEFAULT_JS,
+      })
+    )
   }
 
-  // Save snippet and return saved slug
   const handleSave = useCallback(async (): Promise<string | null> => {
     setIsSaving(true)
     try {
@@ -187,6 +285,16 @@ export default function App() {
         const result = await res.json()
         setSlug(result.snippet.slug)
         setCreatedAt(result.snippet.createdAt)
+        setSavedSnapshot(
+          JSON.stringify({
+            title,
+            tagsInput,
+            useTailwind,
+            html,
+            css,
+            js,
+          })
+        )
         await fetchSnippets()
         setSavedToast(true)
         setTimeout(() => setSavedToast(false), 2000)
@@ -209,7 +317,6 @@ export default function App() {
 
       setIsUploading(true)
       try {
-        // Ensure snippet exists on disk before uploading assets
         let activeSlug = slug
         if (!activeSlug) {
           const createdSlug = await handleSave()
@@ -273,6 +380,44 @@ export default function App() {
     fetchSnippets()
   }
 
+  const handleCopyActiveTab = () => {
+    const content = activeTab === 'html' ? html : activeTab === 'css' ? css : js
+    navigator.clipboard.writeText(content)
+    setCopiedCode(true)
+    setTimeout(() => setCopiedCode(false), 1500)
+  }
+
+  const handleExportHtml = () => {
+    const tailwindTag = useTailwind
+      ? '  <script src="https://cdn.tailwindcss.com"></script>\n'
+      : ''
+    const standalone = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${title}</title>
+${tailwindTag}  <style>
+${css}
+  </style>
+</head>
+<body>
+${html}
+  <script>
+${js}
+  </script>
+</body>
+</html>`
+
+    const blob = new Blob([standalone], { type: 'text/html' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${slug || 'snippet'}.html`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   // Ctrl+S / Cmd+S shortcut
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -285,7 +430,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [handleSave])
 
-  // Global Ctrl+V clipboard image paste support
+  // Global Ctrl+V clipboard image paste
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       const items = e.clipboardData?.items
@@ -312,7 +457,7 @@ export default function App() {
     return () => window.removeEventListener('paste', onPaste)
   }, [handleUploadFiles, rightMode])
 
-  // Build sandboxed HTML and resolve ./assets/ paths to local backend URLs
+  // Build sandboxed HTML with console bridge + asset path resolution
   const srcDoc = useMemo(() => {
     const tailwindTag = debouncedCode.useTailwind
       ? '<script src="https://cdn.tailwindcss.com"></script>'
@@ -326,12 +471,38 @@ export default function App() {
       ? debouncedCode.css.replace(/(["'(])(?:\.\/)?assets\//g, `$1${assetBase}`)
       : debouncedCode.css
 
+    const consoleBridge = `<script>
+      (function() {
+        const send = (level, args) => {
+          try {
+            const formatted = args.map((a) => {
+              if (typeof a === 'object' && a !== null) {
+                try { return JSON.stringify(a, null, 2); } catch { return String(a); }
+              }
+              return String(a);
+            });
+            window.parent.postMessage({ type: 'snippet-console', level, message: formatted.join(' ') }, '*');
+          } catch {}
+        };
+        const origLog = console.log;
+        const origWarn = console.warn;
+        const origErr = console.error;
+        console.log = (...args) => { origLog(...args); send('log', args); };
+        console.warn = (...args) => { origWarn(...args); send('warn', args); };
+        console.error = (...args) => { origErr(...args); send('error', args); };
+        window.onerror = (msg, _src, line) => {
+          send('error', [msg + (line ? ' (line ' + line + ')' : '')]);
+        };
+      })();
+    </script>`
+
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   ${tailwindTag}
+  ${consoleBridge}
   <style>${resolvedCss}</style>
 </head>
 <body>
@@ -347,12 +518,19 @@ export default function App() {
 </html>`
   }, [debouncedCode, slug])
 
+  const allTags = useMemo(() => {
+    const set = new Set<string>()
+    snippets.forEach((s) => s.tags.forEach((t) => set.add(t)))
+    return Array.from(set).sort()
+  }, [snippets])
+
   const filteredSnippets = snippets.filter((s) => {
     const q = search.toLowerCase()
-    return (
+    const matchesSearch =
       s.title.toLowerCase().includes(q) ||
       s.tags.some((t) => t.toLowerCase().includes(q))
-    )
+    const matchesTag = !selectedTag || s.tags.includes(selectedTag)
+    return matchesSearch && matchesTag
   })
 
   const viewportWidthClass = {
@@ -379,8 +557,8 @@ export default function App() {
           </button>
         </div>
 
-        {/* Search */}
-        <div className="p-3">
+        {/* Search & Tag Filter */}
+        <div className="space-y-2 p-3">
           <div className="relative">
             <Search className="absolute top-2.5 left-2.5 h-3.5 w-3.5 text-zinc-500" />
             <input
@@ -391,15 +569,43 @@ export default function App() {
               className="w-full rounded-md border border-zinc-800 bg-zinc-950 py-1.5 pr-3 pl-8 text-xs text-zinc-200 placeholder-zinc-500 focus:border-indigo-500 focus:outline-none"
             />
           </div>
+
+          {allTags.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              <button
+                onClick={() => setSelectedTag(null)}
+                className={`rounded px-1.5 py-0.5 text-[10px] transition ${
+                  selectedTag === null
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                All
+              </button>
+              {allTags.map((tag) => (
+                <button
+                  key={tag}
+                  onClick={() =>
+                    setSelectedTag((prev) => (prev === tag ? null : tag))
+                  }
+                  className={`rounded px-1.5 py-0.5 text-[10px] transition ${
+                    selectedTag === tag
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  #{tag}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Snippet List */}
         <div className="flex-1 space-y-1 overflow-y-auto px-2 pb-4">
           {filteredSnippets.length === 0 ? (
             <p className="px-2 py-6 text-center text-xs text-zinc-500">
-              No snippets saved yet.
-              <br />
-              Press Save (Ctrl+S) to store in vault.
+              No matching snippets found.
             </p>
           ) : (
             filteredSnippets.map((item) => (
@@ -483,14 +689,23 @@ export default function App() {
             </button>
 
             <button
+              onClick={handleExportHtml}
+              title="Export as standalone .html file"
+              className="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-zinc-800"
+            >
+              <Download className="h-3.5 w-3.5" />
+              Export
+            </button>
+
+            <button
               onClick={() => handleSave()}
               disabled={isSaving}
-              className="flex items-center gap-1.5 rounded-md bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-500 disabled:opacity-50"
+              className="relative flex items-center gap-1.5 rounded-md bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-500 disabled:opacity-50"
             >
               {savedToast ? (
                 <>
                   <Check className="h-3.5 w-3.5" />
-                  Saved to JSON
+                  Saved
                 </>
               ) : (
                 <>
@@ -498,14 +713,28 @@ export default function App() {
                   {isSaving ? 'Saving...' : 'Save'}
                 </>
               )}
+              {isDirty && !savedToast && (
+                <span
+                  title="Unsaved changes"
+                  className="ml-0.5 h-2 w-2 rounded-full bg-amber-400"
+                />
+              )}
             </button>
           </div>
         </header>
 
-        {/* Split Pane: Code Editor (Left) & Preview/Media (Right) */}
-        <div className="flex flex-1 overflow-hidden">
+        {/* Resizable Split Pane */}
+        <div
+          ref={splitContainerRef}
+          className={`flex flex-1 overflow-hidden ${
+            isResizing ? 'select-none' : ''
+          }`}
+        >
           {/* Code Editor Panel */}
-          <section className="flex w-1/2 flex-col border-r border-zinc-800">
+          <section
+            style={{ width: `${editorWidthPct}%` }}
+            className="flex shrink-0 flex-col"
+          >
             <div className="flex items-center justify-between border-b border-zinc-800 bg-zinc-900/50 px-3">
               <div className="flex">
                 {(['html', 'css', 'js'] as EditorTab[]).map((tab) => (
@@ -522,11 +751,31 @@ export default function App() {
                   </button>
                 ))}
               </div>
-              {slug && (
-                <span className="text-[11px] text-zinc-500">
-                  vault/{slug}/snippet.json
-                </span>
-              )}
+
+              <div className="flex items-center gap-2">
+                {slug && (
+                  <span className="hidden text-[11px] text-zinc-500 xl:inline">
+                    vault/{slug}/snippet.json
+                  </span>
+                )}
+                <button
+                  onClick={handleCopyActiveTab}
+                  title={`Copy ${activeTab.toUpperCase()} code`}
+                  className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                >
+                  {copiedCode ? (
+                    <>
+                      <Check className="h-3 w-3 text-emerald-400" />
+                      Copied
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="h-3 w-3" />
+                      Copy
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
 
             <div className="flex-1 overflow-auto bg-[#282c34]">
@@ -563,8 +812,17 @@ export default function App() {
             </div>
           </section>
 
-          {/* Right Panel: Preview / Images / Compare */}
-          <section className="flex w-1/2 flex-col bg-zinc-900/30">
+          {/* Draggable Divider */}
+          <div
+            onMouseDown={() => setIsResizing(true)}
+            title="Drag to resize panels"
+            className={`w-1 shrink-0 cursor-col-resize bg-zinc-800 transition hover:bg-indigo-500 ${
+              isResizing ? 'bg-indigo-500' : ''
+            }`}
+          />
+
+          {/* Right Panel: Preview / Images / Compare + Console */}
+          <section className="flex min-w-0 flex-1 flex-col bg-zinc-900/30">
             {/* Mode & Viewport Toolbar */}
             <div className="flex items-center justify-between border-b border-zinc-800 bg-zinc-900/50 px-3 py-1.5">
               <div className="flex items-center gap-1 rounded-md bg-zinc-950 p-0.5">
@@ -642,7 +900,10 @@ export default function App() {
                   <div className="mx-1 h-4 w-px bg-zinc-800" />
 
                   <button
-                    onClick={() => setPreviewKey((k) => k + 1)}
+                    onClick={() => {
+                      setLogs([])
+                      setPreviewKey((k) => k + 1)
+                    }}
                     title="Reload Preview"
                     className="rounded p-1.5 text-zinc-500 hover:text-zinc-300"
                   >
@@ -660,7 +921,9 @@ export default function App() {
                   title="Snippet Live Preview"
                   srcDoc={srcDoc}
                   sandbox="allow-scripts allow-modals"
-                  className={`${viewportWidthClass} h-full rounded-lg border border-zinc-800 bg-white transition-all duration-200`}
+                  className={`${viewportWidthClass} h-full rounded-lg border border-zinc-800 bg-white transition-all duration-200 ${
+                    isResizing ? 'pointer-events-none' : ''
+                  }`}
                 />
               </div>
             )}
@@ -692,7 +955,9 @@ export default function App() {
                       title="Compare Live Preview"
                       srcDoc={srcDoc}
                       sandbox="allow-scripts allow-modals"
-                      className={`${viewportWidthClass} h-full bg-white transition-all duration-200`}
+                      className={`${viewportWidthClass} h-full bg-white transition-all duration-200 ${
+                        isResizing ? 'pointer-events-none' : ''
+                      }`}
                     />
                   </div>
                 </div>
@@ -734,6 +999,16 @@ export default function App() {
                   </div>
                 </div>
               </div>
+            )}
+
+            {/* Collapsible Console Panel */}
+            {rightMode !== 'images' && (
+              <ConsolePanel
+                logs={logs}
+                isOpen={isConsoleOpen}
+                onToggle={() => setIsConsoleOpen((o) => !o)}
+                onClear={() => setLogs([])}
+              />
             )}
           </section>
         </div>
